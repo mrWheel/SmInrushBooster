@@ -4,12 +4,6 @@
 ** Copyright 2023 Willem Aandewiel
 ** Version 1.0  23-03-2023
 ** 
-** 
-** PACKAGES: 
-**   - framework-arduino-avr-attiny @ 1.5.2 
-**   - tool-avrdude @ 1.60300.200527 (6.3.0) 
-**   - toolchain-atmelavr @ 1.70300.191015 (7.3.0)
-** 
 ** Use avrfuses.app to set fuses:
 **      Extended  : 0xFF
 **      High      : 0xDE (but 0xDF might also "work" --> brown-out detection disabled)
@@ -47,9 +41,9 @@
 
 #include <arduino.h>
 
-#define HSSW1   2
+#define HSSW1   0
 #define HSSW2   1
-#define HSSW3   0
+#define HSSW3   2
 
 //----------------------------------------------------------------
 void setup() 
