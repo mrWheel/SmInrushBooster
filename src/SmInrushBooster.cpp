@@ -1,13 +1,22 @@
 /*
-** ATtiny85 Slimme Meter Inrush Booster controller
+**  ATtiny85 Slimme Meter Inrush Booster controller
 ** 
-** Copyright 2023 Willem Aandewiel
-** Version 1.0  23-03-2023
+**  Copyright (c) 2023 Willem Aandewiel
+**  TERMS OF USE: MIT License. See bottom of file.
+**
+**  Version 2.0  25-08-2023
 ** 
-** Use avrfuses.app to set fuses:
-**      Extended  : 0xFF
-**      High      : 0xDE (but 0xDF might also "work" --> brown-out detection disabled)
-**      Low       : 0xE2
+**  Use PROJECT TASKS -> Platform -> "Set Fuses":
+**        Extended  : 0xFF
+**
+**              Serial program downloading (SPI) enabled
+**              brown-out Detection 1.8v (0xDE)
+**              brown-out detection 2.7v (0xDD)
+**              brown-out detection 4.3v (0xDC)
+**        High      : 0xDD 
+**
+**              Clock source Int.RC Osc. 8MHz PWRDWN/RESET: 6 CK/1
+**        Low       : 0xE2
 **
 **    [Program] -> [Verify] -> [Read]
 **
@@ -25,16 +34,12 @@
 ** save EEPROM        : "EEPROM not retained"
 ** B.O.D. Level (Only set on bootload): "B.O.D. Enabled (1.8v)"
 ** 
-**  Copyright (c) 2023 Willem Aandewiel
-**
-**  TERMS OF USE: MIT License. See bottom of file.
-**
 ** ATMEL ATTINY85
 **                        +--\/--+
 **             RESET PB5 1|      |8 VCC
-**    -->[AnalogIn]  PB3 2|      |7 PB2  --> HSSW1_YEL
-**  <-- mySerial(Tx) PB4 3|      |6 PB1  --> HSSW2_BLU
-**                   GND 4|      |5 PB0  --> HSSW1_RED 
+**    -->[AnalogIn]  PB3 2|      |7 PB2  --> HSSW2U1_CHARGE
+**  <-- mySerial(Tx) PB4 3|      |6 PB1  --> HSSW1U3_STEPUP
+**                   GND 4|      |5 PB0  --> HSSW0U2_SM_PWR 
 **                        +------+
 **
 */
@@ -47,13 +52,25 @@
   SoftwareSerial mySerial(-1,4);  //rx, tx
 #endif 
 
-#define HSSW1_RED   0
-#define HSSW2_BLU   1
-#define HSSW1_YEL   2
+#define HSSW0U2_SM_PWR    0
+#define HSSW1U3_STEPUP    1
+#define HSSW2U1_CHARGE    2
+
+#define _BAT_V_LIMIT      3.5
+#define _BATT_LOW_LIMIT   2.8
+#define _MAX_STEPUP_TIME  20000
+#define _SM_GRACE_TIME    20000
+
+#define INV_ON        LOW
+#define INV_OFF       HIGH
+
+enum    { _STATE_UNKNOWN, _STATE_INIT, _STATE_CHARGE, _STATE_STRT_STEPUP, _STATE_STEPUP, _STATE_SM_PWR, _STATE_NORMAL };
 
 float       battV;
-int16_t     prevBattV10;
+int8_t      state = _STATE_INIT;
+int16_t     battV10, battV100, prevBattV10, prevBattV100;
 uint32_t    loopCount = 0;
+uint32_t    stepupTimer, smGraceTimer;
 
 //----------------------------------------------------------------
 float readAnalogVoltage(int pin) 
@@ -75,14 +92,15 @@ float readAnalogVoltage(int pin)
     delay(10);
   }
   analogValue = avarage / 15;
-  /*
-  mySerial.print("analogValue [");
-  mySerial.print(analogValue);
-  mySerial.print("] ");
-  */
   // Calculate the voltage from the analog value.
   //int16_t voltageI10 = (int)(analogValue * 5 / 1024.0); 
   float voltage = (analogValue * 5.0) / 1024.0;
+
+  if (voltage >= 4.98)
+  {
+    //mySerial.println("Probably no power from SM!!  ");
+    voltage = 0.01;
+  }
 
   return voltage;
 
@@ -90,24 +108,121 @@ float readAnalogVoltage(int pin)
 
 
 //----------------------------------------------------------------
+void showBattVoltage()
+{
+    prevBattV10  = battV10;
+    prevBattV100 = battV100;
+    mySerial.print("battVoltage is [");
+    mySerial.print(battV);
+    /***
+    mySerial.print("], battV10[");
+    mySerial.print(battV10);
+    mySerial.print("], battV100[");
+    mySerial.print(battV100);
+    ***/
+    mySerial.println("]");
+    mySerial.flush();
+
+} //  showBattVoltage()
+
+
+//----------------------------------------------------------------
+int8_t startCharging()
+{
+  mySerial.println("\r\nstartCharging() ..");
+  mySerial.flush();
+  digitalWrite(HSSW2U1_CHARGE, INV_ON);
+  digitalWrite(HSSW0U2_SM_PWR, INV_OFF);
+  digitalWrite(HSSW1U3_STEPUP, INV_OFF);
+  return _STATE_CHARGE;
+
+} //  startCharging();
+
+
+//----------------------------------------------------------------
+int8_t continueCharging()
+{
+  digitalWrite(HSSW2U1_CHARGE, INV_ON);
+  digitalWrite(HSSW0U2_SM_PWR, INV_OFF);
+  digitalWrite(HSSW1U3_STEPUP, INV_OFF);
+
+  if (battV >= _BAT_V_LIMIT) 
+  { 
+    showBattVoltage();
+    stepupTimer = millis();
+    return _STATE_STRT_STEPUP; 
+  }
+
+  return _STATE_CHARGE;
+
+} //  continueCharging();
+
+
+//----------------------------------------------------------------
+int8_t startStepUp()
+{
+  mySerial.println("startStepUp() ..");
+  mySerial.flush();
+  digitalWrite(HSSW1U3_STEPUP, INV_ON);
+  digitalWrite(HSSW2U1_CHARGE, INV_ON);
+  digitalWrite(HSSW0U2_SM_PWR, INV_OFF);
+  return _STATE_STEPUP;
+  
+} //  startStepUp();
+
+
+//----------------------------------------------------------------
+int8_t startSmPower()
+{
+  mySerial.println("startSmPower() ..");
+  mySerial.flush();
+  digitalWrite(HSSW0U2_SM_PWR, INV_ON);
+  smGraceTimer = millis();
+  //-tst-digitalWrite(HSSW2U1_CHARGE, INV_OFF);
+  for(int i=0; i<5; i++)
+  {
+    showBattVoltage();
+    delay(500);
+  }
+  /*
+  mySerial.println("stop StepUp ..");
+  mySerial.flush();
+  digitalWrite(HSSW1U3_STEPUP, INV_OFF);
+  */
+  return _STATE_NORMAL;
+  
+} //  startSmPower();
+
+
+//----------------------------------------------------------------
 void setup() 
 {
+  digitalWrite(HSSW0U2_SM_PWR, INV_OFF);
+  digitalWrite(HSSW1U3_STEPUP, INV_OFF);
+  digitalWrite(HSSW2U1_CHARGE, INV_OFF);
+  pinMode(HSSW0U2_SM_PWR, OUTPUT);
+  digitalWrite(HSSW0U2_SM_PWR, INV_OFF);
+  pinMode(HSSW1U3_STEPUP, OUTPUT);
+  digitalWrite(HSSW1U3_STEPUP, INV_OFF);
+  pinMode(HSSW2U1_CHARGE, OUTPUT);
+
   mySerial.begin(9600);
   delay(500);
+  mySerial.println("\r\nAnd than it Begins ...\r\n");
   mySerial.flush();
-  mySerial.println("\r\nAnd than it begins ..\r\n");
-
-  digitalWrite(HSSW1_RED, LOW);
-  digitalWrite(HSSW2_BLU, LOW);
-  digitalWrite(HSSW1_YEL, LOW);
-  pinMode(HSSW1_RED, OUTPUT);
-  digitalWrite(HSSW1_RED, LOW);
-  pinMode(HSSW2_BLU, OUTPUT);
-  digitalWrite(HSSW2_BLU, LOW);
-  pinMode(HSSW1_YEL, OUTPUT);
-  digitalWrite(HSSW1_YEL, LOW);
+  for(int i=0; i<5;i++)
+  {
+    mySerial.println("Toggle HSSW2U1_CHARGE ...");
+    mySerial.flush();
+    digitalWrite(HSSW2U1_CHARGE, !digitalRead(HSSW2U1_CHARGE));
+    delay(500);
+  }
+  //-- start Charging
+  mySerial.println("Switch on HSSW2U1_CHARGE");
+  digitalWrite(HSSW2U1_CHARGE, INV_ON);
 
   loopCount = 0;
+  state = _STATE_INIT;
 
 } // setup()
 
@@ -116,41 +231,57 @@ void setup()
 void loop() 
 {
   delay(1000);
-  digitalWrite(HSSW1_RED, !digitalRead(HSSW1_RED));
-  //digitalWrite(HSSW2_BLU, LOW);
-  //digitalWrite(HSSW1_YEL, LOW);
-  
-  battV = readAnalogVoltage(3);
-  int16_t battV10 = battV * 100;
-  battV = battV10 / 100.0;
   loopCount++;
 
-  if ( ((loopCount%60) == 0) || (prevBattV10 != (int)(battV*10)) )
-  //if ( (loopCount%10) == 0) 
-  {
-    prevBattV10 = (int)battV*10;
-    mySerial.print("battVoltage is [");
-    mySerial.print(battV);
-    mySerial.print("]  ");
+  battV = readAnalogVoltage(3);
+  battV100 = (battV * 100);
+  battV = battV100 / 100.0;
+  battV10  = (battV * 10);
 
-    if (battV > 3.9)
-    {
-      digitalWrite(HSSW2_BLU, HIGH);
-      mySerial.println("Switch booster to 'ON' ..");
-    }
-    else if (battV > 3.6)
-    {
-      digitalWrite(HSSW1_YEL, HIGH);
-      digitalWrite(HSSW2_BLU, LOW);
-      mySerial.println("almost there ..");
-    }
-    else 
-    {
-      digitalWrite(HSSW2_BLU, LOW);
-      digitalWrite(HSSW1_YEL, LOW);
-      mySerial.println();
-    }
+  if ( ((loopCount%30) == 0) || (prevBattV10 != battV10) )
+  {
+    showBattVoltage();
   }
+
+  //-- SM disconnected??
+  if (battV < 0.5)  state = _STATE_INIT;
+
+  //-- finite State Machine ...
+  switch(state)
+  {
+    case _STATE_UNKNOWN:      state = _STATE_INIT;  
+                              break;
+    case _STATE_INIT:         state = startCharging();
+                              break;
+    case _STATE_CHARGE:       state = continueCharging();
+                              break;
+    case _STATE_STRT_STEPUP:  state = startStepUp();
+                              break;
+    case _STATE_STEPUP:       {
+                                showBattVoltage();
+                                if (battV < _BATT_LOW_LIMIT)
+                                {
+                                  mySerial.println("Battery voltage too low (< 2.5v).");
+                                  state = _STATE_INIT;
+                                }
+                                else if ((millis() - stepupTimer) > _MAX_STEPUP_TIME)
+                                {
+                                  state = _STATE_SM_PWR;
+                                }
+                              }
+                              break;
+    case _STATE_SM_PWR:       state = startSmPower();
+                              break;
+    case _STATE_NORMAL: 
+    default:                  {
+                                if ( (millis() - smGraceTimer) > _SM_GRACE_TIME )
+                                {
+                                  digitalWrite(HSSW2U1_CHARGE, INV_ON);
+                                }
+                                break;
+                              }
+
+  } //-- state
 
 } // loop()
 
