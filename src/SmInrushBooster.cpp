@@ -57,7 +57,8 @@
 #define HSSW2U1_CHARGE    2
 
 #define _BAT_V_LIMIT      3.5
-#define _BATT_LOW_LIMIT   2.8
+#define _BAT_MAX_LIMIT    3.8
+#define _BATT_LOW_LIMIT   3.0
 #define _MAX_STEPUP_TIME  20000
 #define _SM_GRACE_TIME    20000
 
@@ -112,7 +113,9 @@ void showBattVoltage()
 {
     prevBattV10  = battV10;
     prevBattV100 = battV100;
-    mySerial.print("battVoltage is [");
+    mySerial.print(F("State["));
+    mySerial.print(state);
+    mySerial.print(F("] -> battVoltage is ["));
     mySerial.print(battV);
     /***
     mySerial.print("], battV10[");
@@ -120,7 +123,7 @@ void showBattVoltage()
     mySerial.print("], battV100[");
     mySerial.print(battV100);
     ***/
-    mySerial.println("]");
+    mySerial.println(F("]"));
     mySerial.flush();
 
 } //  showBattVoltage()
@@ -129,7 +132,7 @@ void showBattVoltage()
 //----------------------------------------------------------------
 int8_t startCharging()
 {
-  mySerial.println("\r\nstartCharging() ..");
+  mySerial.println(F("\r\nstartCharging() .."));                         
   mySerial.flush();
   digitalWrite(HSSW2U1_CHARGE, INV_ON);
   digitalWrite(HSSW0U2_SM_PWR, INV_OFF);
@@ -161,10 +164,10 @@ int8_t continueCharging()
 //----------------------------------------------------------------
 int8_t startStepUp()
 {
-  mySerial.println("startStepUp() ..");
+  mySerial.println(F("startStepUp() .."));
   mySerial.flush();
   digitalWrite(HSSW1U3_STEPUP, INV_ON);
-  digitalWrite(HSSW2U1_CHARGE, INV_ON);
+  digitalWrite(HSSW2U1_CHARGE, INV_OFF);
   digitalWrite(HSSW0U2_SM_PWR, INV_OFF);
   return _STATE_STEPUP;
   
@@ -174,21 +177,32 @@ int8_t startStepUp()
 //----------------------------------------------------------------
 int8_t startSmPower()
 {
-  mySerial.println("startSmPower() ..");
+  mySerial.println(F("startSmPower() .."));
   mySerial.flush();
   digitalWrite(HSSW0U2_SM_PWR, INV_ON);
   smGraceTimer = millis();
-  //-tst-digitalWrite(HSSW2U1_CHARGE, INV_OFF);
+  mySerial.println(F("stop Charging .."));
+  mySerial.flush();
+  digitalWrite(HSSW2U1_CHARGE, INV_OFF);
   for(int i=0; i<5; i++)
   {
     showBattVoltage();
     delay(500);
   }
-  /*
-  mySerial.println("stop StepUp ..");
-  mySerial.flush();
-  digitalWrite(HSSW1U3_STEPUP, INV_OFF);
-  */
+  
+  if (digitalRead(HSSW1U3_STEPUP) == INV_OFF)
+  {
+    mySerial.println(F("start StepUp .."));
+    mySerial.flush();
+    digitalWrite(HSSW1U3_STEPUP, INV_ON);
+  }
+  if (digitalRead(HSSW2U1_CHARGE) == INV_ON)
+  {
+    mySerial.println(F("stop Charging .."));
+    mySerial.flush();
+    digitalWrite(HSSW2U1_CHARGE, INV_OFF);
+  }
+  
   return _STATE_NORMAL;
   
 } //  startSmPower();
@@ -208,17 +222,17 @@ void setup()
 
   mySerial.begin(9600);
   delay(500);
-  mySerial.println("\r\nAnd than it Begins ...\r\n");
+  mySerial.println(F("\r\nAnd than it Begins ...\r\n"));
   mySerial.flush();
   for(int i=0; i<5;i++)
   {
-    mySerial.println("Toggle HSSW2U1_CHARGE ...");
+    mySerial.println(F("Toggle HSSW2U1_CHARGE ..."));
     mySerial.flush();
     digitalWrite(HSSW2U1_CHARGE, !digitalRead(HSSW2U1_CHARGE));
     delay(500);
   }
   //-- start Charging
-  mySerial.println("Switch on HSSW2U1_CHARGE");
+  mySerial.println(F("Switch on HSSW2U1_CHARGE"));
   digitalWrite(HSSW2U1_CHARGE, INV_ON);
 
   loopCount = 0;
@@ -261,7 +275,9 @@ void loop()
                                 showBattVoltage();
                                 if (battV < _BATT_LOW_LIMIT)
                                 {
-                                  mySerial.println("Battery voltage too low (< 2.5v).");
+                                  mySerial.print(F("Battery voltage too low (< "));
+                                  mySerial.print(_BATT_LOW_LIMIT);
+                                  mySerial.println(F(" volt)"));
                                   state = _STATE_INIT;
                                 }
                                 else if ((millis() - stepupTimer) > _MAX_STEPUP_TIME)
@@ -274,9 +290,15 @@ void loop()
                               break;
     case _STATE_NORMAL: 
     default:                  {
-                                if ( (millis() - smGraceTimer) > _SM_GRACE_TIME )
+                                if ( (battV < _BATT_LOW_LIMIT) && (digitalRead(HSSW2U1_CHARGE) == INV_OFF) )
                                 {
+                                  mySerial.println(F("switch CHARGE On.."));
                                   digitalWrite(HSSW2U1_CHARGE, INV_ON);
+                                }
+                                if ( (battV > _BAT_MAX_LIMIT) && (digitalRead(HSSW2U1_CHARGE) == INV_ON) )
+                                {
+                                  mySerial.println(F("switch CHARGE Off.."));
+                                  digitalWrite(HSSW2U1_CHARGE, INV_OFF);
                                 }
                                 break;
                               }
